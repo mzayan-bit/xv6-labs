@@ -2,9 +2,10 @@
 #include "kernel/stat.h"
 #include "user/user.h"
 #include "kernel/fs.h"
+#include "kernel/param.h" 
 
 void
-find(char *path, char *target)
+find(char *path, char *target, char **xargv)
 {
   char buf[512], *p;
   int fd;
@@ -31,7 +32,32 @@ find(char *path, char *target)
   }
 
   if(strcmp(name, target) == 0){
-    printf("%s\n", path);
+    if(xargv == 0){
+
+      printf("%s\n", path);
+    } else {
+
+      int pid = fork();
+      if(pid == 0){
+     
+        char *args[MAXARG];
+        int i = 0;
+        
+        while(xargv[i] != 0 && i < MAXARG - 2){
+          args[i] = xargv[i];
+          i++;
+        }
+     
+        args[i++] = path;
+        args[i] = 0;
+
+        exec(args[0], args);
+        fprintf(2, "find: exec failed\n");
+        exit(1);
+      } else {
+        wait(0);
+      }
+    }
   }
 
   if(st.type == T_DIR){
@@ -47,14 +73,13 @@ find(char *path, char *target)
     while(read(fd, &de, sizeof(de)) == sizeof(de)){
       if(de.inum == 0)
         continue;
-      
       if(strcmp(de.name, ".") == 0 || strcmp(de.name, "..") == 0)
         continue;
       
       memmove(p, de.name, DIRSIZ);
-      p[DIRSIZ] = 0; 
+      p[DIRSIZ] = 0;
       
-      find(buf, target);
+      find(buf, target, xargv);
     }
   }
   close(fd);
@@ -64,9 +89,19 @@ int
 main(int argc, char *argv[])
 {
   if(argc < 3){
-    fprintf(2, "Usage: find <path> <target>\n");
+    fprintf(2, "Usage: find <path> <target> [-exec cmd ...]\n");
     exit(1);
   }
-  find(argv[1], argv[2]);
+
+  char **xargv = 0;
+  
+  if(argc > 3 && strcmp(argv[3], "-exec") == 0){
+    if(argc < 5){
+      fprintf(2, "find: -exec needs a command\n");
+      exit(1);
+    }
+    xargv = &argv[4];
+  }
+  find(argv[1], argv[2], xargv);
   exit(0);
 }
