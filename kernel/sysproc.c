@@ -37,6 +37,13 @@ sys_wait(void)
 }
 
 uint64
+sys_kmemfree(void)
+{
+  
+  return kmemfree();
+}
+
+uint64
 sys_sbrk(void)
 {
   uint64 addr;
