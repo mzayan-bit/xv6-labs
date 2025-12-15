@@ -16,6 +16,8 @@
 #include "file.h"
 #include "fcntl.h"
 
+static struct inode* create(char *path, short type, short major, short minor);
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -31,6 +33,36 @@ argfd(int n, int *pfd, struct file **pf)
     *pfd = fd;
   if(pf)
     *pf = f;
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  
+  // Create inode of type T_SYMLINK
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+
+  // Write the target path into the data blocks
+  if(writei(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }
 
@@ -319,8 +351,22 @@ sys_open(void)
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
-      end_op();
-      return -1;
+      // Create failed. It might be because the file is a symlink.
+      // Let's try to lookup the inode directly.
+      if((ip = namei(path)) == 0){
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+      // If it's a directory or reg file, create failing means it exists.
+      // But if it's a SYMLINK, we must fall through to the loop below
+      // to resolve the target.
+      if(ip->type != T_SYMLINK){
+         // Not a symlink? Then the create failure was real (e.g. dir).
+         iunlockput(ip);
+         end_op();
+         return -1;
+      }
     }
   } else {
     if((ip = namei(path)) == 0){
@@ -328,11 +374,60 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
+  }
+
+  // --- SYMLINK RESOLUTION LOOP ---
+  if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+    int depth = 0;
+    for(depth = 0; depth < 10; depth++){
+      // 1. Read the target path from the symlink
+      char target[MAXPATH];
+      if(readi(ip, 0, (uint64)target, 0, MAXPATH) != MAXPATH){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      iunlockput(ip); // Release the link
+
+      // 2. Try to find the target
+      ip = namei(target);
+      
+      // 3. If target is missing...
+      if(ip == 0){
+        // If we are in O_CREATE mode, create the target now!
+        if(omode & O_CREATE){
+           ip = create(target, T_FILE, 0, 0);
+           if(ip == 0){
+             end_op();
+             return -1;
+           }
+           // create returns a LOCKED inode, so we are good.
+        } else {
+           end_op();
+           return -1;
+        }
+      } else {
+        ilock(ip); // Lock the found target
+      }
+
+      // 4. If the new ip is NOT a symlink, we are done!
+      if(ip->type != T_SYMLINK)
+        break;
+    }
+    
+    // Check if we hit the recursion limit
+    if(depth >= 10){
       iunlockput(ip);
       end_op();
       return -1;
     }
+  }
+  // ---------------------
+
+  if(ip->type == T_DIR && omode != O_RDONLY){
+    iunlockput(ip);
+    end_op();
+    return -1;
   }
 
   if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
@@ -369,7 +464,6 @@ sys_open(void)
 
   return fd;
 }
-
 uint64
 sys_mkdir(void)
 {

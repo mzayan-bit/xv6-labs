@@ -22,7 +22,7 @@
 
 int nbitmap = FSSIZE/BPB + 1;
 int ninodeblocks = NINODES / IPB + 1;
-int nlog = LOGBLOCKS+1;   // Header followed by LOGBLOCKS data blocks.
+int nlog = LOGBLOCKS+1; 
 int nmeta;    // Number of meta blocks (boot, sb, nlog, inode, bitmap)
 int nblocks;  // Number of data blocks
 
@@ -31,7 +31,6 @@ struct superblock sb;
 char zeroes[BSIZE];
 uint freeinode = 1;
 uint freeblock;
-
 
 void balloc(int);
 void wsect(uint, void*);
@@ -42,7 +41,6 @@ uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
 void die(const char *);
 
-// convert to riscv byte order
 ushort
 xshort(ushort x)
 {
@@ -74,7 +72,6 @@ main(int argc, char *argv[])
   char buf[BSIZE];
   struct dinode din;
 
-
   static_assert(sizeof(int) == 4, "Integers must be 4 bytes!");
 
   if(argc < 2){
@@ -105,7 +102,7 @@ main(int argc, char *argv[])
   printf("nmeta %d (boot, super, log blocks %u, inode blocks %u, bitmap blocks %u) blocks %d total %d\n",
          nmeta, nlog, ninodeblocks, nbitmap, nblocks, FSSIZE);
 
-  freeblock = nmeta;     // the first free block that we can allocate
+  freeblock = nmeta; 
 
   for(i = 0; i < FSSIZE; i++)
     wsect(i, zeroes);
@@ -128,7 +125,6 @@ main(int argc, char *argv[])
   iappend(rootino, &de, sizeof(de));
 
   for(i = 2; i < argc; i++){
-    // get rid of "user/"
     char *shortname;
     if(strncmp(argv[i], "user/", 5) == 0)
       shortname = argv[i] + 5;
@@ -140,10 +136,6 @@ main(int argc, char *argv[])
     if((fd = open(argv[i], 0)) < 0)
       die(argv[i]);
 
-    // Skip leading _ in name when writing to file system.
-    // The binaries are named _rm, _cat, etc. to keep the
-    // build operating system from trying to execute them
-    // in place of system binaries like rm and cat.
     if(shortname[0] == '_')
       shortname += 1;
 
@@ -162,7 +154,6 @@ main(int argc, char *argv[])
     close(fd);
   }
 
-  // fix size of root inode dir
   rinode(rootino, &din);
   off = xint(din.size);
   off = ((off/BSIZE) + 1) * BSIZE;
@@ -263,16 +254,20 @@ iappend(uint inum, void *xp, int n)
 
   rinode(inum, &din);
   off = xint(din.size);
-  // printf("append inum %d at off %d sz %d\n", inum, off, n);
+  
   while(n > 0){
     fbn = off / BSIZE;
     assert(fbn < MAXFILE);
+    
+    // 1. Direct Blocks
     if(fbn < NDIRECT){
       if(xint(din.addrs[fbn]) == 0){
         din.addrs[fbn] = xint(freeblock++);
       }
       x = xint(din.addrs[fbn]);
-    } else {
+    } 
+    // 2. Singly Indirect Blocks
+    else if(fbn < NDIRECT + NINDIRECT){
       if(xint(din.addrs[NDIRECT]) == 0){
         din.addrs[NDIRECT] = xint(freeblock++);
       }
@@ -282,7 +277,39 @@ iappend(uint inum, void *xp, int n)
         wsect(xint(din.addrs[NDIRECT]), (char*)indirect);
       }
       x = xint(indirect[fbn-NDIRECT]);
+    } 
+    // 3. Doubly Indirect Blocks
+    else {
+      // Load/Create the Doubly Indirect Block (at index 12)
+      if(xint(din.addrs[NDIRECT+1]) == 0){
+        din.addrs[NDIRECT+1] = xint(freeblock++);
+      }
+      
+      // Read the double-indirect block to find the single-indirect block
+      rsect(xint(din.addrs[NDIRECT+1]), (char*)indirect);
+      
+      // Note: We subtract (NDIRECT + NINDIRECT) to get the offset 
+      uint idx1 = (fbn - (NDIRECT + NINDIRECT)) / NINDIRECT;
+      
+      if(indirect[idx1] == 0){
+        indirect[idx1] = xint(freeblock++);
+        wsect(xint(din.addrs[NDIRECT+1]), (char*)indirect);
+      }
+      
+      // Now read the single-indirect block to find the data block
+      uint addr_lvl1 = xint(indirect[idx1]);
+      uint indirect2[NINDIRECT];
+      rsect(addr_lvl1, (char*)indirect2);
+      
+      uint idx2 = (fbn - (NDIRECT + NINDIRECT)) % NINDIRECT;
+      
+      if(indirect2[idx2] == 0){
+        indirect2[idx2] = xint(freeblock++);
+        wsect(addr_lvl1, (char*)indirect2);
+      }
+      x = xint(indirect2[idx2]);
     }
+
     n1 = min(n, (fbn + 1) * BSIZE - off);
     rsect(x, buf);
     bcopy(p, buf + off - (fbn * BSIZE), n1);
